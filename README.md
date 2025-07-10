@@ -7,3 +7,5 @@ By leveraging advanced **machine learning** and **neuroimaging data** (fMRI, PET
 ---
 
 https://sites.wustl.edu/oasisbrains/home/oasis-1/
+
+https://github.com/Tencent/MedicalNet?tab=readme-ov-file
