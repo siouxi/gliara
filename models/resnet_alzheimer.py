@@ -10,7 +10,6 @@ __all__ = [
     'resnet152', 'resnet200'
 ]
 
-
 def conv3x3x3(in_planes, out_planes, stride=1, dilation=1):
     # 3x3x3 convolution with padding
     return nn.Conv3d(
@@ -21,7 +20,6 @@ def conv3x3x3(in_planes, out_planes, stride=1, dilation=1):
         stride=stride,
         padding=dilation,
         bias=False)
-
 
 def downsample_basic_block(x, planes, stride, no_cuda=False):
     out = F.avg_pool3d(x, kernel_size=1, stride=stride)
@@ -35,7 +33,6 @@ def downsample_basic_block(x, planes, stride, no_cuda=False):
     out = Variable(torch.cat([out.data, zero_pads], dim=1))
 
     return out
-
 
 class BasicBlock(nn.Module):
     expansion = 1
@@ -67,7 +64,6 @@ class BasicBlock(nn.Module):
         out = self.relu(out)
 
         return out
-
 
 class Bottleneck(nn.Module):
     expansion = 4
@@ -108,18 +104,18 @@ class Bottleneck(nn.Module):
 
         return out
 
-
 class ResNet(nn.Module):
-
     def __init__(self,
                  block,
                  layers,
                  sample_input_D,
                  sample_input_H,
                  sample_input_W,
-                 num_seg_classes,
+                 num_classes=1,
                  shortcut_type='B',
-                 no_cuda = False):
+                 no_cuda=False,
+                 pretrained_weights=None,
+                 freeze_conv_layers=True):
         self.inplanes = 64
         self.no_cuda = no_cuda
         super(ResNet, self).__init__()
@@ -130,7 +126,7 @@ class ResNet(nn.Module):
             stride=(2, 2, 2),
             padding=(3, 3, 3),
             bias=False)
-            
+        
         self.bn1 = nn.BatchNorm3d(64)
         self.relu = nn.ReLU(inplace=True)
         self.maxpool = nn.MaxPool3d(kernel_size=(3, 3, 3), stride=2, padding=1)
@@ -142,38 +138,24 @@ class ResNet(nn.Module):
         self.layer4 = self._make_layer(
             block, 512, layers[3], shortcut_type, stride=1, dilation=4)
 
-        self.conv_seg = nn.Sequential(
-                                        nn.ConvTranspose3d(
-                                        512 * block.expansion,
-                                        32,
-                                        2,
-                                        stride=2
-                                        ),
-                                        nn.BatchNorm3d(32),
-                                        nn.ReLU(inplace=True),
-                                        nn.Conv3d(
-                                        32,
-                                        32,
-                                        kernel_size=3,
-                                        stride=(1, 1, 1),
-                                        padding=(1, 1, 1),
-                                        bias=False), 
-                                        nn.BatchNorm3d(32),
-                                        nn.ReLU(inplace=True),
-                                        nn.Conv3d(
-                                        32,
-                                        num_seg_classes,
-                                        kernel_size=1,
-                                        stride=(1, 1, 1),
-                                        bias=False) 
-                                        )
+        self.avgpool = nn.AdaptiveAvgPool3d((1, 1, 1))
+        self.fc = nn.Linear(512 * block.expansion, num_classes)
 
         for m in self.modules():
             if isinstance(m, nn.Conv3d):
-                m.weight = nn.init.kaiming_normal(m.weight, mode='fan_out')
+                m.weight = nn.init.kaiming_normal_(m.weight, mode='fan_out', nonlinearity='relu')
             elif isinstance(m, nn.BatchNorm3d):
                 m.weight.data.fill_(1)
                 m.bias.data.zero_()
+            elif isinstance(m, nn.Linear):
+                nn.init.kaiming_normal_(m.weight, mode='fan_out', nonlinearity='relu')
+                m.bias.data.zero_()
+
+        if pretrained_weights is not None:
+            self.load_pretrained_weights(pretrained_weights)
+
+        if freeze_conv_layers:
+            self._freeze_conv_layers()
 
     def _make_layer(self, block, planes, blocks, shortcut_type, stride=1, dilation=1):
         downsample = None
@@ -191,7 +173,8 @@ class ResNet(nn.Module):
                         planes * block.expansion,
                         kernel_size=1,
                         stride=stride,
-                        bias=False), nn.BatchNorm3d(planes * block.expansion))
+                        bias=False),
+                    nn.BatchNorm3d(planes * block.expansion))
 
         layers = []
         layers.append(block(self.inplanes, planes, stride=stride, dilation=dilation, downsample=downsample))
@@ -200,6 +183,31 @@ class ResNet(nn.Module):
             layers.append(block(self.inplanes, planes, dilation=dilation))
 
         return nn.Sequential(*layers)
+
+    def _freeze_conv_layers(self):
+        for name, param in self.named_parameters():
+            if 'fc' not in name:
+                param.requires_grad = False
+
+    def load_pretrained_weights(self, pretrained_weights):
+        pretrained_dict = torch.load(pretrained_weights, map_location='cpu')
+        model_dict = self.state_dict()
+        filtered_dict = {k: v for k, v in pretrained_dict.items() if k in model_dict and v.size() == model_dict[k].size()}
+        model_dict.update(filtered_dict)
+        self.load_state_dict(model_dict)
+        print(f"Loaded pre-trained weights from {pretrained_weights}. Mismatched layers were skipped.")
+
+    def _get_feature_map_size(self, D, H, W):
+        x = torch.randn(1, 1, D, H, W)
+        x = self.conv1(x)
+        x = self.bn1(x)
+        x = self.relu(x)
+        x = self.maxpool(x)
+        x = self.layer1(x)
+        x = self.layer2(x)
+        x = self.layer3(x)
+        x = self.layer4(x)
+        return x.size()[2:]
 
     def forward(self, x):
         x = self.conv1(x)
@@ -210,54 +218,42 @@ class ResNet(nn.Module):
         x = self.layer2(x)
         x = self.layer3(x)
         x = self.layer4(x)
-        x = self.conv_seg(x)
-
+        x = self.avgpool(x)
+        x = x.view(x.size(0), -1)
+        x = self.fc(x)
         return x
 
 def resnet10(**kwargs):
-    """Constructs a ResNet-18 model.
-    """
+    """Constructs a ResNet-10 model."""
     model = ResNet(BasicBlock, [1, 1, 1, 1], **kwargs)
     return model
 
-
 def resnet18(**kwargs):
-    """Constructs a ResNet-18 model.
-    """
+    """Constructs a ResNet-18 model."""
     model = ResNet(BasicBlock, [2, 2, 2, 2], **kwargs)
     return model
 
-
 def resnet34(**kwargs):
-    """Constructs a ResNet-34 model.
-    """
+    """Constructs a ResNet-34 model."""
     model = ResNet(BasicBlock, [3, 4, 6, 3], **kwargs)
     return model
 
-
 def resnet50(**kwargs):
-    """Constructs a ResNet-50 model.
-    """
+    """Constructs a ResNet-50 model."""
     model = ResNet(Bottleneck, [3, 4, 6, 3], **kwargs)
     return model
 
-
 def resnet101(**kwargs):
-    """Constructs a ResNet-101 model.
-    """
+    """Constructs a ResNet-101 model."""
     model = ResNet(Bottleneck, [3, 4, 23, 3], **kwargs)
     return model
 
-
 def resnet152(**kwargs):
-    """Constructs a ResNet-101 model.
-    """
+    """Constructs a ResNet-152 model."""
     model = ResNet(Bottleneck, [3, 8, 36, 3], **kwargs)
     return model
 
-
 def resnet200(**kwargs):
-    """Constructs a ResNet-101 model.
-    """
+    """Constructs a ResNet-200 model."""
     model = ResNet(Bottleneck, [3, 24, 36, 3], **kwargs)
     return model
